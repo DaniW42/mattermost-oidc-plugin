@@ -28,10 +28,10 @@ const (
 
 	// oidcStateCookie holds the OAuth state token in the browser that started the
 	// flow. It is set at /oauth2/connect and required to match the state at
-	// /oauth2/callback (web/desktop), binding the flow to that browser. Without it,
+	// /oauth2/callback (web), binding the flow to that browser. Without it,
 	// an attacker could pre-generate a valid code+state for their own IdP account and
 	// feed the callback to a victim, silently logging the victim into the attacker's
-	// account (login CSRF). The mobile deep-link flow is exempt (see the callback).
+	// account (login CSRF). The mobile and desktop flows are exempt (see the callback).
 	oidcStateCookie = "MMOIDCSTATE"
 )
 
@@ -47,14 +47,6 @@ type OAuthState struct {
 	MobileRedirect string `json:"mobile_redirect,omitempty"`
 	// DesktopChallenge is the PKCE-style challenge of the Desktop app that started a system-browser login.
 	DesktopChallenge string `json:"desktop_challenge,omitempty"`
-	// Popup, when true, marks a login started from a popup window (window.open)
-	// rather than a full-page navigation. The webapp uses this on the Mattermost
-	// Desktop app, whose main window hard-blocks navigation to an external IdP but
-	// renders a plugin-URL popup in a trusted, session-sharing window that *does*
-	// permit it. In this mode the callback still sets the session cookie (shared
-	// with the opener) but, instead of a 302, renders an HTML page that closes the
-	// popup and navigates the opener to the return path.
-	Popup bool `json:"popup,omitempty"`
 	// CodeVerifier is the PKCE S256 verifier (RFC 7636). Stored in KV, never in the URL state parameter.
 	CodeVerifier string `json:"code_verifier,omitempty"`
 	// Nonce is sent on the authorization request and must match the ID token
@@ -130,10 +122,6 @@ func (p *Plugin) handleOAuth2Connect(w http.ResponseWriter, r *http.Request) {
 		mobileRedirect = ""
 	}
 
-	// Popup mode is only meaningful for the (cookie-based) web/desktop flow, so it
-	// is ignored when a mobile redirect is present.
-	popup := mobileRedirect == "" && r.URL.Query().Get("popup") == "1"
-
 	desktopChallenge := r.URL.Query().Get("desktop_challenge")
 	if desktopChallenge != "" && (!desktopChallengeRe.MatchString(desktopChallenge) || mobileRedirect != "") {
 		http.Error(w, "Invalid desktop_challenge", http.StatusBadRequest)
@@ -153,7 +141,6 @@ func (p *Plugin) handleOAuth2Connect(w http.ResponseWriter, r *http.Request) {
 		ReturnTo:         returnTo,
 		MobileRedirect:   mobileRedirect,
 		DesktopChallenge: desktopChallenge,
-		Popup:            popup,
 		Nonce:            nonce,
 	}
 
@@ -274,7 +261,7 @@ func (p *Plugin) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Login-CSRF protection (web/desktop): the browser finishing the flow must be the
+	// Login-CSRF protection (web): the browser finishing the flow must be the
 	// one that started it, proven by the state cookie set at connect. The mobile
 	// deep-link flow is exempt — the token is handed straight to the app rather than
 	// via a shared browser session, and its in-app auth session may not round-trip the
@@ -409,15 +396,6 @@ func (p *Plugin) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 
 	returnTo := safeReturnTo(state.ReturnTo)
 
-	// Popup login (Desktop app / browser popup): a plain 302 would only navigate
-	// the popup itself, leaving the opener on the login page. Instead render a page
-	// that hands control back — it navigates the opener to returnTo and closes the
-	// popup, with a same-origin storage broadcast as a COOP-safe fallback.
-	if state.Popup {
-		p.renderPopupAuthComplete(w, siteURL, returnTo)
-		return
-	}
-
 	http.Redirect(w, r, siteURL+returnTo, http.StatusFound)
 }
 
@@ -466,70 +444,6 @@ func (p *Plugin) createLoginSession(r *http.Request, mmUser *model.User, isMobil
 		return nil, "", appErr
 	}
 	return session, csrfToken, nil
-}
-
-// renderPopupAuthComplete renders the HTML page shown in the popup window after a
-// successful web/desktop login. The session cookie has already been set on this
-// same response, so it is present in the origin's (shared) cookie jar; this page's
-// only job is to move the *opener* to the logged-in app and dismiss the popup.
-//
-// It moves the opener two ways (both harmless if both land):
-//  1. a same-origin localStorage write — reaches the opener via a `storage` event
-//     even when COOP severed window.opener after the cross-origin IdP round-trip
-//     (this is the case in the Desktop app).
-//  2. window.opener.location — direct, for when the opener reference survives.
-//
-// It then closes the popup. It deliberately does NOT navigate the popup itself to
-// the app: this page is only ever reached from the webapp's `window.open` flow, so
-// the opener (the login page) always carries the storage listener — self-navigating
-// would just leave a confusing second logged-in window open. If the browser refuses
-// to close a script-opened window, the static "you can close this window" text
-// remains visible with a manual link as an escape hatch.
-func (p *Plugin) renderPopupAuthComplete(w http.ResponseWriter, siteURL, returnTo string) {
-	target := siteURL + returnTo
-
-	// Encode the target as a JS string literal. encoding/json escapes <, >, & to
-	// </>/& by default, so the value is safe to embed inside <script>
-	// even though returnTo originates from a request parameter. Marshalling a string
-	// never fails.
-	targetJS, _ := json.Marshal(target)
-
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, private")
-	w.Header().Set("Pragma", "no-cache")
-	w.Header().Set("Referrer-Policy", "no-referrer")
-	w.WriteHeader(http.StatusOK)
-	_, _ = fmt.Fprintf(w, `<!DOCTYPE html>
-<html>
-<head>
-	<meta charset="utf-8">
-	<meta name="viewport" content="width=device-width, initial-scale=1.0">
-	<title>Authentication complete</title>
-</head>
-<body style="font-family: sans-serif; max-width: 600px; margin: 50px auto; text-align: center;">
-	<h2>Authentication complete</h2>
-	<p>You are logged in. You can close this window.</p>
-	<p><a href="%s">Open Mattermost here</a></p>
-	<script>
-	(function () {
-		var target = %s;
-		// Tell the opener (the login page, which carries a matching storage listener)
-		// to proceed. A same-origin storage event reaches it even when window.opener
-		// was severed by COOP after the cross-origin IdP round-trip (Desktop app).
-		try { window.localStorage.setItem('mattermost_oidc_login', String(new Date().getTime())); } catch (e) {}
-		// Also move the opener directly when the reference survives (harmless duplicate).
-		try {
-			if (window.opener && !window.opener.closed) {
-				window.opener.location = target;
-			}
-		} catch (e) {}
-		// Dismiss this popup. Do NOT navigate it into the app — that would leave a
-		// second logged-in window open (the bug this replaced).
-		try { window.close(); } catch (e) {}
-	})();
-	</script>
-</body>
-</html>`, html.EscapeString(target), targetJS)
 }
 
 // renderMobileAuthComplete renders an HTML page that redirects the in-app browser to the

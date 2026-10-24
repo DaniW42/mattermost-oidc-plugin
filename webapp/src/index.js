@@ -38,30 +38,6 @@ const OIDCLoginButton = () => {
         return () => controller.abort();
     }, []);
 
-    // When the login runs in a popup window (see handleClick), the popup can't always
-    // reach back into this (opener) window — the Mattermost Desktop app and browsers
-    // with COOP sever window.opener after the cross-origin IdP round-trip. The popup
-    // therefore also broadcasts completion via a same-origin localStorage write, which
-    // fires a `storage` event here. On that signal, navigate to the logged-in app so
-    // the freshly set session cookie takes effect.
-    useEffect(() => {
-        const onStorage = (e) => {
-            if (e.key === 'mattermost_oidc_login' && e.newValue) {
-                let returnTo = new URLSearchParams(window.location.search).get('redirect_to') || '/';
-                // Only allow same-origin relative paths, mirroring the server-side
-                // validation. Without this, a crafted ?redirect_to= (e.g. //evil.com
-                // or a javascript: URI) would be navigated to on login — an open
-                // redirect / DOM-XSS, since this value is otherwise unvalidated here.
-                if (!returnTo.startsWith('/') || returnTo.startsWith('//') || returnTo.includes('\\')) {
-                    returnTo = '/';
-                }
-                window.location.assign(returnTo);
-            }
-        };
-        window.addEventListener('storage', onStorage);
-        return () => window.removeEventListener('storage', onStorage);
-    }, []);
-
     useEffect(() => {
         if (!isDesktopApp(window.navigator.userAgent)) {
             return undefined;
