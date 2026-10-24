@@ -142,6 +142,14 @@ Go to **System Console → Plugins → OIDC Authentication**:
 
 When **Auto-Link Existing Accounts by Email** is enabled, consider also enabling **Require Email Verified** after setting **Email Verified Claim** to `email_verified` (or your provider's claim name) if your identity provider sends that claim. This prevents linking to an existing account via an unverified email address.
 
+#### Desktop app
+
+The Mattermost Desktop app signs in through the system browser and returns to the app via `mattermost://`. This requires that:
+
+- the app's server URL equals the configured `SiteURL`,
+- `mattermost://` is registered for the app, and
+- the identity provider is not served from the `SiteURL` origin.
+
 ### 3. Restart the server
 
 After saving, the Mattermost / Mostlymatter server must be restarted.

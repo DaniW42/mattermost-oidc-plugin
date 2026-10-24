@@ -390,7 +390,6 @@ func (p *Plugin) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Web/desktop: set the session token cookie shared with the opener/main window.
 	siteURL := p.getSiteURL()
 	p.setSessionCookie(w, r, session, siteURL)
 
