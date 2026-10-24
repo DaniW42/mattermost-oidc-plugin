@@ -57,6 +57,12 @@ type OAuthState struct {
 	// Nonce is sent on the authorization request and must match the ID token
 	// nonce claim after verification (OIDC Core 3.1.3.7).
 	Nonce string `json:"nonce,omitempty"`
+	// Mode is "" for the web/popup/mobile flows (RC2 behaviour) or
+	// "desktop_external" for the system-browser Desktop flow (desktop_flow.go).
+	Mode string `json:"mode,omitempty"`
+	// DesktopChallenge is SHA-256(dv) of the Desktop app's secret verifier;
+	// required when Mode is "desktop_external".
+	DesktopChallenge string `json:"desktop_challenge,omitempty"`
 }
 
 // allowedMobileSchemes are the exact custom-scheme callback URLs the native
@@ -246,12 +252,30 @@ func (p *Plugin) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// System-browser desktop flow: the callback runs in the system browser, not in
+	// the app's cookie jar, so there is no MMOIDCSTATE cookie. The binding to the
+	// app is the desktop verifier, checked at redeem. Only the server-side state
+	// record decides the mode; mixed or unknown states fail closed.
+	isDesktopExternal := state.Mode == stateModeDesktopExternal
+	if state.Mode != "" && !isDesktopExternal {
+		p.API.LogWarn("OAuth state has an unknown mode")
+		p.renderError(w, "Invalid authentication state. Please try again.")
+		return
+	}
+	if isDesktopExternal {
+		if p.effectiveDesktopLoginMode() != desktopModeExternalBrowser || !desktopChallengeRe.MatchString(state.DesktopChallenge) || state.Popup || state.MobileRedirect != "" {
+			p.API.LogWarn("Rejected desktop OAuth state: mode unavailable or state inconsistent")
+			p.renderError(w, "Invalid authentication state. Please try again.")
+			return
+		}
+	}
+
 	// Login-CSRF protection (web/desktop): the browser finishing the flow must be the
 	// one that started it, proven by the state cookie set at connect. The mobile
 	// deep-link flow is exempt — the token is handed straight to the app rather than
 	// via a shared browser session, and its in-app auth session may not round-trip the
 	// cookie. Reject before the token exchange to avoid needless work.
-	if state.MobileRedirect == "" {
+	if state.MobileRedirect == "" && !isDesktopExternal {
 		if !stateCookieMatches(r, stateToken) {
 			p.API.LogWarn("OAuth state cookie missing or mismatched — possible login CSRF")
 			p.clearStateCookie(w)
@@ -352,11 +376,59 @@ func (p *Plugin) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create a user session with expiry from Mattermost config.
-	// Mobile logins use the (typically longer) mobile session length.
-	mmConfig := p.API.GetConfig()
-	isMobile := state.MobileRedirect != ""
+	// System-browser desktop login: no session here. Hand a single-use code back
+	// to the app instead; the session is created at redeem.
+	if isDesktopExternal {
+		p.issueDesktopHandoff(w, &state, mmUser)
+		return
+	}
 
+	isMobile := state.MobileRedirect != ""
+	session, csrfToken, appErr := p.createLoginSession(r, mmUser, isMobile)
+	if appErr != nil {
+		p.API.LogError("Failed to create session", "error", appErr.Error(), "user_id", mmUser.Id)
+		p.renderError(w, "Failed to create session. Please try again.")
+		return
+	}
+
+	// Successful standard logins are intentionally not logged above Debug level.
+	p.API.LogDebug("OIDC login succeeded", "user_id", mmUser.Id, "mobile", isMobile)
+
+	// Mobile login: hand the session token back to the native app through its custom
+	// URL scheme, mirroring core's /oauth/<service>/mobile_login (token + CSRF appended
+	// to the deep link, delivered via an HTML auto-redirect page rather than a 302 —
+	// a custom-scheme navigation must originate from within the page).
+	if isMobile {
+		p.renderMobileAuthComplete(w, state.MobileRedirect, session.Token, csrfToken)
+		return
+	}
+
+	// Web/desktop: set the session token cookie shared with the opener/main window.
+	siteURL := p.getSiteURL()
+	p.setSessionCookie(w, r, session, siteURL)
+
+	returnTo := state.ReturnTo
+	if returnTo == "" || !strings.HasPrefix(returnTo, "/") || strings.HasPrefix(returnTo, "//") || strings.ContainsRune(returnTo, '\\') {
+		returnTo = "/"
+	}
+
+	// Popup login (Desktop app / browser popup): a plain 302 would only navigate
+	// the popup itself, leaving the opener on the login page. Instead render a page
+	// that hands control back — it navigates the opener to returnTo and closes the
+	// popup, with a same-origin storage broadcast as a COOP-safe fallback.
+	if state.Popup {
+		p.renderPopupAuthComplete(w, siteURL, returnTo)
+		return
+	}
+
+	http.Redirect(w, r, siteURL+returnTo, http.StatusFound)
+}
+
+// createLoginSession creates a Mattermost session for an OIDC-authenticated user
+// and returns it with the CSRF token stored in its props. Mobile logins use the
+// (typically longer) mobile session length.
+func (p *Plugin) createLoginSession(r *http.Request, mmUser *model.User, isMobile bool) (*model.Session, string, *model.AppError) {
+	mmConfig := p.API.GetConfig()
 	sessionLengthHours := 720 // fallback: 30 days
 	if mmConfig != nil {
 		if isMobile && mmConfig.ServiceSettings.SessionLengthMobileInHours != nil {
@@ -396,39 +468,9 @@ func (p *Plugin) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 	if appErr != nil {
-		p.API.LogError("Failed to create session", "error", appErr.Error(), "user_id", mmUser.Id)
-		p.renderError(w, "Failed to create session. Please try again.")
-		return
+		return nil, "", appErr
 	}
-
-	// Mobile login: hand the session token back to the native app through its custom
-	// URL scheme, mirroring core's /oauth/<service>/mobile_login (token + CSRF appended
-	// to the deep link, delivered via an HTML auto-redirect page rather than a 302 —
-	// a custom-scheme navigation must originate from within the page).
-	if isMobile {
-		p.renderMobileAuthComplete(w, state.MobileRedirect, session.Token, csrfToken)
-		return
-	}
-
-	// Web/desktop: set the session token cookie shared with the opener/main window.
-	siteURL := p.getSiteURL()
-	p.setSessionCookie(w, r, session, siteURL)
-
-	returnTo := state.ReturnTo
-	if returnTo == "" || !strings.HasPrefix(returnTo, "/") || strings.HasPrefix(returnTo, "//") || strings.ContainsRune(returnTo, '\\') {
-		returnTo = "/"
-	}
-
-	// Popup login (Desktop app / browser popup): a plain 302 would only navigate
-	// the popup itself, leaving the opener on the login page. Instead render a page
-	// that hands control back — it navigates the opener to returnTo and closes the
-	// popup, with a same-origin storage broadcast as a COOP-safe fallback.
-	if state.Popup {
-		p.renderPopupAuthComplete(w, siteURL, returnTo)
-		return
-	}
-
-	http.Redirect(w, r, siteURL+returnTo, http.StatusFound)
+	return session, csrfToken, nil
 }
 
 // renderPopupAuthComplete renders the HTML page shown in the popup window after a
@@ -743,6 +785,8 @@ func (p *Plugin) handleGetPublicConfig(w http.ResponseWriter, r *http.Request) {
 		"enable":       config.Enable && config.IsValid() == nil,
 		"button_text":  config.ButtonText,
 		"button_color": config.ButtonColor,
+		// Effective mode (fail closed to popup); the webapp only acts on external_browser.
+		"desktop_login_mode": p.effectiveDesktopLoginMode(),
 	}
 
 	w.Header().Set("Content-Type", "application/json")

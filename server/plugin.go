@@ -131,6 +131,10 @@ func (p *Plugin) OnConfigurationChange() error {
 		return nil // if settings did not change and the provider is already running, skip re-discovery.
 	}
 
+	if m := configuration.DesktopLoginMode; m != "" && m != desktopModePopup && m != desktopModeExternalBrowser {
+		p.API.LogWarn("Unknown DesktopLoginMode, falling back to popup")
+	}
+
 	p.setConfiguration(&configuration)
 	p.clearOIDCProvider() // clear old config to prevent stale, outdated config in case the newly saved one is invalid
 
@@ -269,6 +273,10 @@ func (p *Plugin) initRouter() {
 	// OAuth2 endpoints
 	p.router.HandleFunc("/oauth2/connect", p.handleOAuth2Connect).Methods(http.MethodGet)
 	p.router.HandleFunc("/oauth2/callback", p.handleOAuth2Callback).Methods(http.MethodGet)
+
+	// System-browser desktop login (only served when DesktopLoginMode is effectively external_browser)
+	p.router.HandleFunc("/oauth2/desktop/start", p.handleDesktopStart).Methods(http.MethodPost)
+	p.router.HandleFunc("/oauth2/desktop/redeem", p.handleDesktopRedeem).Methods(http.MethodPost)
 
 	// API endpoints
 	p.router.HandleFunc("/api/v1/config", p.handleGetPublicConfig).Methods(http.MethodGet)

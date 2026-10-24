@@ -1,11 +1,35 @@
 import React, {useEffect, useState} from 'react';
 
+import {createDesktopFlow, selectDesktopLoginMode} from './desktop_flow';
+
 const PLUGIN_ID = 'mattermost-oidc';
+
+// One system-browser desktop flow per view (shared by initialize() and the button).
+let desktopFlow = null;
+function getDesktopFlow() {
+    if (!desktopFlow) {
+        desktopFlow = createDesktopFlow({
+            sessionStorage: window.sessionStorage,
+            fetch: window.fetch.bind(window),
+            open: window.open.bind(window),
+            location: window.location,
+            history: window.history,
+            crypto: window.crypto,
+            now: () => Date.now(),
+            setInterval: (fn, ms) => window.setInterval(fn, ms),
+            clearInterval: (id) => window.clearInterval(id),
+            // MMUSERID is the non-HttpOnly cookie Mattermost sets together with the session.
+            isLoggedIn: () => document.cookie.split(';').some((c) => c.trim().startsWith('MMUSERID=')),
+        });
+    }
+    return desktopFlow;
+}
 
 // OIDCLoginButton adds a custom SSO button to the Mattermost login page.
 const OIDCLoginButton = () => {
     const [config, setConfig] = useState(null);
     const [loading, setLoading] = useState(true);
+    const [flowState, setFlowState] = useState(() => getDesktopFlow().state);
 
     useEffect(() => {
         const controller = new AbortController();
@@ -53,12 +77,28 @@ const OIDCLoginButton = () => {
         return () => window.removeEventListener('storage', onStorage);
     }, []);
 
+    // Re-render on system-browser flow changes and pick up a returned handoff code
+    // (deep link delivered while this component is mounted).
+    useEffect(() => {
+        const flow = getDesktopFlow();
+        const unsubscribe = flow.subscribe((f) => setFlowState(f.state));
+        flow.check();
+        return unsubscribe;
+    }, []);
+
     if (loading || !config || !config.enable) {
         return null;
     }
 
     const handleClick = () => {
         const returnTo = new URLSearchParams(window.location.search).get('redirect_to') || '/';
+        const mode = selectDesktopLoginMode({publicConfig: config, userAgent: window.navigator.userAgent});
+        if (mode === 'external_browser') {
+            // Desktop + admin enabled system-browser login: the server returns the IdP URL,
+            // the app opens it in the default browser and receives the result via mattermost://.
+            getDesktopFlow().start({returnTo});
+            return;
+        }
         const base = `/plugins/${PLUGIN_ID}/oauth2/connect?return_to=${encodeURIComponent(returnTo)}`;
 
         // The popup is only needed inside the Mattermost Desktop app (Electron): it
@@ -108,10 +148,18 @@ const OIDCLoginButton = () => {
         marginRight: '8px',
     };
 
+    const flow = getDesktopFlow();
+    const flowActive = ['starting', 'waiting', 'redeeming', 'error'].includes(flowState);
+    const flowRedeeming = flowState === 'redeeming';
+    const linkStyle = {background: 'none', border: 'none', color: 'inherit', textDecoration: 'underline', cursor: 'pointer', padding: '0 6px', fontSize: '12px'};
+    const returnToParam = new URLSearchParams(window.location.search).get('redirect_to') || '/';
+
     return (
+        <div>
         <button
             style={buttonStyle}
             onClick={handleClick}
+            disabled={flowRedeeming}
             onMouseOver={(e) => e.currentTarget.style.opacity = '0.85'}
             onMouseOut={(e) => e.currentTarget.style.opacity = '1'}
             type='button'
@@ -124,12 +172,30 @@ const OIDCLoginButton = () => {
             </svg>
             {config.button_text || 'Log in with OIDC'}
         </button>
+        {flowActive && (
+            <div style={{marginBottom: '8px', fontSize: '12px', textAlign: 'center'}}>
+                <div>{flowState === 'error' ? flow.message : flowRedeeming ? 'Anmeldung wird abgeschlossen …' : 'Anmeldung im Browser fortsetzen …'}</div>
+                {!flowRedeeming && <>
+                    <button type='button' style={linkStyle} onClick={() => flow.start({returnTo: returnToParam})}>{'Erneut öffnen'}</button>
+                    <button type='button' style={linkStyle} onClick={() => flow.cancel()}>{'Abbrechen'}</button>
+                    <button type='button' style={linkStyle} onClick={() => flow.useInAppPopup({returnTo: returnToParam})}>{'Im App-Fenster anmelden'}</button>
+                </>}
+            </div>
+        )}
+        </div>
     );
 };
 
 // Plugin registration
 class PluginClass {
     initialize(registry) {
+        // System-browser login: a returned handoff code may arrive via page load before
+        // the login component mounts, and the app regains focus after the browser step.
+        const flow = getDesktopFlow();
+        flow.check();
+        window.addEventListener('focus', () => flow.check());
+        document.addEventListener('visibilitychange', () => flow.check());
+
         // Register the login button component on the custom login buttons slot.
         // This hook is available in Mattermost v7.8+ (webapp plugin API).
         if (registry.registerCustomLoginButtonComponent) {

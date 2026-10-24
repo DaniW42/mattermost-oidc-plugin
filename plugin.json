@@ -145,6 +145,17 @@
                 "type": "text",
                 "help_text": "Team name (slug) to add newly created users to. Leave blank to skip auto-joining.",
                 "default": ""
+            },
+            {
+                "key": "DesktopLoginMode",
+                "display_name": "Desktop App Login Mode",
+                "type": "dropdown",
+                "default": "popup",
+                "options": [
+                    {"display_name": "In-app popup window (default)", "value": "popup"},
+                    {"display_name": "System browser (external_browser)", "value": "external_browser"}
+                ],
+                "help_text": "popup: login runs in a Mattermost Desktop popup. external_browser: login runs in the system browser (password manager, passkeys) and returns via mattermost://. Requires an https SiteURL and an identity provider on a different origin than SiteURL. The Desktop app server URL must equal SiteURL."
             }
         ]
     }

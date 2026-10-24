@@ -25,6 +25,7 @@ type Configuration struct {
 	AutoCreateAccounts   bool   `json:"AutoCreateAccounts"`
 	AutoLinkByEmail      bool   `json:"AutoLinkByEmail"`
 	DefaultTeam          string `json:"DefaultTeam"`
+	DesktopLoginMode     string `json:"DesktopLoginMode"`
 }
 
 // IsValid checks that all required configuration fields are present.

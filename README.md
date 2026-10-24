@@ -139,6 +139,11 @@ Go to **System Console → Plugins → OIDC Authentication**:
 | **Auto-Create Accounts**                 | Automatically create new accounts | `true`                                                |
 | **Auto-Link Existing Accounts by Email** | Link existing accounts by email   | `false`                                               |
 | **Default Team**                         | Team slug for new users           | `main`                                                |
+| **Desktop App Login Mode**               | `popup` (default) or `external_browser` | `popup`                                         |
+
+#### Desktop login in the system browser (`external_browser`)
+
+By default the Mattermost Desktop app logs in through an in-app popup. Set **Desktop App Login Mode** to `external_browser` to run the login in the system browser instead (password managers, passkeys) and return to the app via `mattermost://`. Requirements: `SiteURL` is `https`, the identity provider is on a different origin than `SiteURL`, the Desktop app's server URL equals `SiteURL`, and `mattermost://` is registered for the app. The session is never created in the system browser: it returns a short-lived (120 s), single-use code that only the app that started the login can redeem. If a requirement is not met the plugin silently stays in `popup` mode, and the login screen offers "Im App-Fenster anmelden" as a manual fallback. Consider a proxy rate limit for `/plugins/mattermost-oidc/oauth2/desktop/*`.
 
 When **Auto-Link Existing Accounts by Email** is enabled, consider also enabling **Require Email Verified** after setting **Email Verified Claim** to `email_verified` (or your provider's claim name) if your identity provider sends that claim. This prevents linking to an existing account via an unverified email address.
 
