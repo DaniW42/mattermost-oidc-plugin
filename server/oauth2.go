@@ -352,11 +352,47 @@ func (p *Plugin) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create a user session with expiry from Mattermost config.
-	// Mobile logins use the (typically longer) mobile session length.
-	mmConfig := p.API.GetConfig()
 	isMobile := state.MobileRedirect != ""
+	session, csrfToken, appErr := p.createLoginSession(r, mmUser, isMobile)
+	if appErr != nil {
+		p.API.LogError("Failed to create session", "error", appErr.Error(), "user_id", mmUser.Id)
+		p.renderError(w, "Failed to create session. Please try again.")
+		return
+	}
 
+	// Mobile login: hand the session token back to the native app through its custom
+	// URL scheme, mirroring core's /oauth/<service>/mobile_login (token + CSRF appended
+	// to the deep link, delivered via an HTML auto-redirect page rather than a 302 —
+	// a custom-scheme navigation must originate from within the page).
+	if isMobile {
+		p.renderMobileAuthComplete(w, state.MobileRedirect, session.Token, csrfToken)
+		return
+	}
+
+	// Web/desktop: set the session token cookie shared with the opener/main window.
+	siteURL := p.getSiteURL()
+	p.setSessionCookie(w, r, session, siteURL)
+
+	returnTo := state.ReturnTo
+	if returnTo == "" || !strings.HasPrefix(returnTo, "/") || strings.HasPrefix(returnTo, "//") || strings.ContainsRune(returnTo, '\\') {
+		returnTo = "/"
+	}
+
+	// Popup login (Desktop app / browser popup): a plain 302 would only navigate
+	// the popup itself, leaving the opener on the login page. Instead render a page
+	// that hands control back — it navigates the opener to returnTo and closes the
+	// popup, with a same-origin storage broadcast as a COOP-safe fallback.
+	if state.Popup {
+		p.renderPopupAuthComplete(w, siteURL, returnTo)
+		return
+	}
+
+	http.Redirect(w, r, siteURL+returnTo, http.StatusFound)
+}
+
+// createLoginSession creates a Mattermost session for a user who completed OIDC login.
+func (p *Plugin) createLoginSession(r *http.Request, mmUser *model.User, isMobile bool) (*model.Session, string, *model.AppError) {
+	mmConfig := p.API.GetConfig()
 	sessionLengthHours := 720 // fallback: 30 days
 	if mmConfig != nil {
 		if isMobile && mmConfig.ServiceSettings.SessionLengthMobileInHours != nil {
@@ -396,39 +432,9 @@ func (p *Plugin) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 	if appErr != nil {
-		p.API.LogError("Failed to create session", "error", appErr.Error(), "user_id", mmUser.Id)
-		p.renderError(w, "Failed to create session. Please try again.")
-		return
+		return nil, "", appErr
 	}
-
-	// Mobile login: hand the session token back to the native app through its custom
-	// URL scheme, mirroring core's /oauth/<service>/mobile_login (token + CSRF appended
-	// to the deep link, delivered via an HTML auto-redirect page rather than a 302 —
-	// a custom-scheme navigation must originate from within the page).
-	if isMobile {
-		p.renderMobileAuthComplete(w, state.MobileRedirect, session.Token, csrfToken)
-		return
-	}
-
-	// Web/desktop: set the session token cookie shared with the opener/main window.
-	siteURL := p.getSiteURL()
-	p.setSessionCookie(w, r, session, siteURL)
-
-	returnTo := state.ReturnTo
-	if returnTo == "" || !strings.HasPrefix(returnTo, "/") || strings.HasPrefix(returnTo, "//") || strings.ContainsRune(returnTo, '\\') {
-		returnTo = "/"
-	}
-
-	// Popup login (Desktop app / browser popup): a plain 302 would only navigate
-	// the popup itself, leaving the opener on the login page. Instead render a page
-	// that hands control back — it navigates the opener to returnTo and closes the
-	// popup, with a same-origin storage broadcast as a COOP-safe fallback.
-	if state.Popup {
-		p.renderPopupAuthComplete(w, siteURL, returnTo)
-		return
-	}
-
-	http.Redirect(w, r, siteURL+returnTo, http.StatusFound)
+	return session, csrfToken, nil
 }
 
 // renderPopupAuthComplete renders the HTML page shown in the popup window after a
