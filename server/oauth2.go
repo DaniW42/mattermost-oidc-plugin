@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"net/http"
@@ -116,10 +117,7 @@ func (p *Plugin) handleOAuth2Connect(w http.ResponseWriter, r *http.Request) {
 	signedState := p.signState(stateToken)
 
 	// Store state in KV with expiry information
-	returnTo := r.URL.Query().Get("return_to")
-	if returnTo == "" || !strings.HasPrefix(returnTo, "/") || strings.HasPrefix(returnTo, "//") || strings.ContainsRune(returnTo, '\\') {
-		returnTo = "/"
-	}
+	returnTo := safeReturnTo(r.URL.Query().Get("return_to"))
 
 	// Mobile login: the native app reaches this endpoint (via the front proxy
 	// rewriting /oauth/openid/mobile_login) and passes its custom-scheme callback
@@ -183,6 +181,32 @@ func (p *Plugin) handleOAuth2Connect(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, authURL, http.StatusFound)
 }
 
+var errKVGone = errors.New("not found or already consumed")
+
+// consumeKV returns the value stored under key and deletes it atomically, so only the first of concurrent callers succeeds.
+func (p *Plugin) consumeKV(key string) ([]byte, error) {
+	value, appErr := p.API.KVGet(key)
+	if appErr != nil || value == nil {
+		return nil, errKVGone
+	}
+	deleted, appErr := p.API.KVCompareAndDelete(key, value)
+	if appErr != nil {
+		return nil, appErr
+	}
+	if !deleted {
+		return nil, errKVGone
+	}
+	return value, nil
+}
+
+// safeReturnTo returns path if it is a same-origin relative path, otherwise "/".
+func safeReturnTo(path string) string {
+	if !strings.HasPrefix(path, "/") || strings.HasPrefix(path, "//") || strings.ContainsRune(path, '\\') {
+		return "/"
+	}
+	return path
+}
+
 // handleOAuth2Callback processes the callback from the OIDC provider after
 // the user has authenticated. It validates the state, exchanges the code
 // for tokens, verifies the ID token, and either creates or updates the
@@ -211,25 +235,14 @@ func (p *Plugin) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Retrieve and atomically consume state from KV.
-	// KVCompareAndDelete ensures only the first concurrent callback wins;
-	// a second request with the same state token gets deleted=false and is rejected.
-	kvKey := KVOAuthStatePrefix + stateToken
-	stateBytes, appErr := p.API.KVGet(kvKey)
-	if appErr != nil || stateBytes == nil {
-		p.API.LogError("OAuth state not found or expired")
-		p.renderError(w, "Authentication session expired. Please try again.")
-		return
-	}
-	deleted, delErr := p.API.KVCompareAndDelete(kvKey, stateBytes)
-	if delErr != nil {
-		p.API.LogError("Failed to consume OAuth state from KV", "key", kvKey, "error", delErr.Error())
-		p.renderError(w, "Internal error")
-		return
-	}
-	if !deleted {
-		p.API.LogWarn("OAuth state already consumed — possible replay attempt", "key", kvKey)
-		p.renderError(w, "Authentication session expired. Please try again.")
+	stateBytes, err := p.consumeKV(KVOAuthStatePrefix + stateToken)
+	if err != nil {
+		p.API.LogWarn("OAuth state rejected", "error", err.Error())
+		if errors.Is(err, errKVGone) {
+			p.renderError(w, "Authentication session expired. Please try again.")
+		} else {
+			p.renderError(w, "Internal error")
+		}
 		return
 	}
 
@@ -373,10 +386,7 @@ func (p *Plugin) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	siteURL := p.getSiteURL()
 	p.setSessionCookie(w, r, session, siteURL)
 
-	returnTo := state.ReturnTo
-	if returnTo == "" || !strings.HasPrefix(returnTo, "/") || strings.HasPrefix(returnTo, "//") || strings.ContainsRune(returnTo, '\\') {
-		returnTo = "/"
-	}
+	returnTo := safeReturnTo(state.ReturnTo)
 
 	// Popup login (Desktop app / browser popup): a plain 302 would only navigate
 	// the popup itself, leaving the opener on the login page. Instead render a page
@@ -518,10 +528,12 @@ func (p *Plugin) renderMobileAuthComplete(w http.ResponseWriter, redirectTo, tok
 	q.Set(model.SessionCookieToken, token) // MMAUTHTOKEN
 	q.Set(model.SessionCookieCsrf, csrf)   // MMCSRF
 	u.RawQuery = q.Encode()
-	link := u.String()
+	p.renderAppRedirect(w, u.String())
+}
 
-	// This page carries the session token + CSRF in the deep-link URL. Prevent any
-	// caching and referrer leakage of those secrets.
+// renderAppRedirect renders a page that sends the browser to the app's custom URL scheme; a custom-scheme navigation has to come from the page (meta refresh / link), not an HTTP 302.
+func (p *Plugin) renderAppRedirect(w http.ResponseWriter, link string) {
+	// The link may carry secrets: prevent caching and referrer leakage.
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, private")
 	w.Header().Set("Pragma", "no-cache")
