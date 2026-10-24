@@ -1,11 +1,20 @@
 import React, {useEffect, useState} from 'react';
 
+import {checkDesktopLogin, hasPendingDesktopLogin, isDesktopApp, startDesktopLogin} from './desktop_login';
+
 const PLUGIN_ID = 'mattermost-oidc';
+const OAUTH2_BASE = `/plugins/${PLUGIN_ID}/oauth2`;
+const DESKTOP_STATUS_TEXT = {
+    starting: 'Redirecting to browser...',
+    waiting: 'Authenticating in the browser, awaiting valid token.',
+    error: 'Something went wrong. Click the button to try again.',
+};
 
 // OIDCLoginButton adds a custom SSO button to the Mattermost login page.
 const OIDCLoginButton = () => {
     const [config, setConfig] = useState(null);
     const [loading, setLoading] = useState(true);
+    const [desktopStatus, setDesktopStatus] = useState('');
 
     useEffect(() => {
         const controller = new AbortController();
@@ -53,36 +62,37 @@ const OIDCLoginButton = () => {
         return () => window.removeEventListener('storage', onStorage);
     }, []);
 
+    useEffect(() => {
+        if (!isDesktopApp(window.navigator.userAgent)) {
+            return undefined;
+        }
+
+        // The app delivers the deep link as a history push or as a full page load.
+        const check = () => checkDesktopLogin({base: OAUTH2_BASE}).then((status) => status && setDesktopStatus(status));
+        check();
+        const timer = setInterval(() => hasPendingDesktopLogin() && check(), 500);
+        return () => clearInterval(timer);
+    }, []);
+
     if (loading || !config || !config.enable) {
         return null;
     }
 
     const handleClick = () => {
         const returnTo = new URLSearchParams(window.location.search).get('redirect_to') || '/';
-        const base = `/plugins/${PLUGIN_ID}/oauth2/connect?return_to=${encodeURIComponent(returnTo)}`;
+        const base = `${OAUTH2_BASE}/connect?return_to=${encodeURIComponent(returnTo)}`;
 
-        // The popup is only needed inside the Mattermost Desktop app (Electron): it
-        // hard-blocks the main window from navigating to the external identity provider
-        // (nothing happens on click), but renders a plugin-URL popup in a trusted,
-        // session-sharing window that *does* allow it.
-        const ua = window.navigator.userAgent;
-        const isDesktopApp = ua.indexOf('Mattermost') !== -1 && ua.indexOf('Electron') !== -1;
-
-        if (!isDesktopApp) {
-            // Regular browser: a plain full-page navigation works fine -> no popup
-            window.location.href = base;
+        if (isDesktopApp(window.navigator.userAgent)) {
+            setDesktopStatus('starting');
+            startDesktopLogin({base: OAUTH2_BASE, returnTo})
+                .then(() => setDesktopStatus('waiting'))
+                .catch((err) => {
+                    console.error('Failed to start desktop login:', err);
+                    setDesktopStatus('error');
+                });
             return;
         }
-
-        // Desktop app: open the flow in a popup. The `popup=1` flag makes the callback
-        // close the popup and hand control back here instead of issuing a plain redirect.
-        const popup = window.open(`${base}&popup=1`, 'oidc_login', 'width=520,height=680');
-        if (!popup) {
-            // Popup blocked: fall back to full-page navigation. This won't complete the
-            // login inside the Desktop app (external nav is blocked), but it's the only
-            // remaining option and potentially avoids a silent no-op on click.
-            window.location.href = base;
-        }
+        window.location.href = base;
     };
 
     const buttonStyle = {
@@ -109,6 +119,7 @@ const OIDCLoginButton = () => {
     };
 
     return (
+        <>
         <button
             style={buttonStyle}
             onClick={handleClick}
@@ -124,6 +135,8 @@ const OIDCLoginButton = () => {
             </svg>
             {config.button_text || 'Log in with OIDC'}
         </button>
+        {desktopStatus && <p>{DESKTOP_STATUS_TEXT[desktopStatus]}</p>}
+        </>
     );
 };
 
