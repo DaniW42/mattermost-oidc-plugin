@@ -627,6 +627,7 @@ func TestGetCookiePath(t *testing.T) {
 // quietAPI drops log calls, which plugintest.API would reject as unexpected.
 type quietAPI struct{ *plugintest.API }
 
+func (quietAPI) LogDebug(string, ...any) {}
 func (quietAPI) LogInfo(string, ...any)  {}
 func (quietAPI) LogWarn(string, ...any)  {}
 func (quietAPI) LogError(string, ...any) {}

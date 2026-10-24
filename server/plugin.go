@@ -269,6 +269,7 @@ func (p *Plugin) initRouter() {
 	// OAuth2 endpoints
 	p.router.HandleFunc("/oauth2/connect", p.handleOAuth2Connect).Methods(http.MethodGet)
 	p.router.HandleFunc("/oauth2/callback", p.handleOAuth2Callback).Methods(http.MethodGet)
+	p.router.HandleFunc("/oauth2/callback", p.handleDesktopRedeem).Methods(http.MethodPost)
 
 	// API endpoints
 	p.router.HandleFunc("/api/v1/config", p.handleGetPublicConfig).Methods(http.MethodGet)
