@@ -63,10 +63,10 @@ func codeFromLink(t *testing.T, link string) string {
 }
 
 func TestDesktopLogin(t *testing.T) {
-	for _, tc := range []struct{ site, link string }{
-		{"https://mm.example", "mattermost://mm.example/login?desktop_code="},
-		{"https://mm.example/chat/", "mattermost://mm.example/chat/login?desktop_code="},
-		{"http://localhost:8065", "mattermost://localhost:8065/login?desktop_code="},
+	for _, tc := range []struct{ site, link, returnTo string }{
+		{"https://mm.example", "mattermost://mm.example/login?desktop_code=", "/team/town-square"},
+		{"https://mm.example/chat/", "mattermost://mm.example/chat/login?desktop_code=", "/chat/team/town-square"},
+		{"http://localhost:8065", "mattermost://localhost:8065/login?desktop_code=", "/team/town-square"},
 	} {
 		t.Run(tc.site, func(t *testing.T) {
 			e := newLoginEnv(t, tc.site)
@@ -87,7 +87,7 @@ func TestDesktopLogin(t *testing.T) {
 			site, _ := url.Parse(tc.site)
 			rec := e.redeem(code, testVerifier, func(r *http.Request) { r.Header.Set("Origin", site.Scheme+"://"+site.Host) })
 			require.Equal(t, http.StatusOK, rec.Code)
-			require.JSONEq(t, `{"return_to":"/team/town-square"}`, rec.Body.String())
+			require.JSONEq(t, `{"return_to":"`+tc.returnTo+`"}`, rec.Body.String())
 			names := map[string]bool{}
 			for _, c := range rec.Result().Cookies() {
 				names[c.Name] = true
@@ -200,4 +200,63 @@ func TestDesktopCodeIsSingleUse(t *testing.T) {
 	wg.Wait()
 	require.EqualValues(t, 1, ok.Load())
 	require.Equal(t, 1, e.sessionCount())
+}
+
+func TestDesktopRedeemRequiresEnabledPlugin(t *testing.T) {
+	e := newLoginEnv(t, testSite)
+	_, link := e.desktopLogin("/")
+	code := codeFromLink(t, link)
+
+	cfg := *e.p.getConfiguration()
+	cfg.Enable = false
+	e.p.setConfiguration(&cfg)
+	require.Equal(t, http.StatusBadRequest, e.redeem(code, testVerifier).Code)
+	require.Zero(t, e.sessionCount())
+
+	cfg.Enable = true
+	e.p.setConfiguration(&cfg)
+	require.Equal(t, http.StatusOK, e.redeem(code, testVerifier).Code, "a refused attempt must not burn the code")
+}
+
+func TestOriginMatchesSite(t *testing.T) {
+	for _, tc := range []struct {
+		name, origin, site string
+		want               bool
+	}{
+		{"same origin", "https://mm.example", "https://mm.example", true},
+		{"site url with path and slash", "https://mm.example", "https://mm.example/chat/", true},
+		{"non-standard port", "http://localhost:8065", "http://localhost:8065", true},
+		{"other port", "http://localhost:8080", "http://localhost:8065", false},
+		{"port missing in origin", "http://localhost", "http://localhost:8065", false},
+		{"explicit default port in site url", "https://mm.example", "https://mm.example:443", true},
+		{"explicit default port in origin", "https://mm.example:443", "https://mm.example", true},
+		{"http default port", "http://mm.example", "http://mm.example:80", true},
+		{"mixed case site url", "https://mm.example", "https://MM.Example", true},
+		{"mixed case origin", "HTTPS://Mm.Example", "https://mm.example", true},
+		{"scheme differs", "http://mm.example", "https://mm.example", false},
+		{"foreign host", "https://evil.example", "https://mm.example", false},
+		{"suffix host", "https://mm.example.evil.example", "https://mm.example", false},
+		{"ipv6", "http://[::1]:8065", "http://[::1]:8065", true},
+		{"null origin", "null", "https://mm.example", false},
+		{"empty origin", "", "https://mm.example", false},
+		{"empty site url", "https://mm.example", "", false},
+		{"both empty", "", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, originMatchesSite(tc.origin, tc.site))
+		})
+	}
+}
+
+func TestSitePath(t *testing.T) {
+	for site, want := range map[string]string{
+		"https://mm.example":         "",
+		"https://mm.example/":        "",
+		"https://mm.example/chat":    "/chat",
+		"https://mm.example/chat/":   "/chat",
+		"http://localhost:8065/a/b/": "/a/b",
+		"":                           "",
+	} {
+		require.Equal(t, want, sitePath(site), site)
+	}
 }

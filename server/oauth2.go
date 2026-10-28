@@ -201,14 +201,6 @@ func (p *Plugin) consumeKV(key string) ([]byte, error) {
 	return value, nil
 }
 
-// safeReturnTo returns path if it is a same-origin relative path, otherwise "/".
-func safeReturnTo(path string) string {
-	if !strings.HasPrefix(path, "/") || strings.HasPrefix(path, "//") || strings.ContainsRune(path, '\\') {
-		return "/"
-	}
-	return path
-}
-
 // handleOAuth2Callback processes the callback from the OIDC provider after
 // the user has authenticated. It validates the state, exchanges the code
 // for tokens, verifies the ID token, and either creates or updates the
@@ -261,12 +253,15 @@ func (p *Plugin) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	isMobile := state.MobileRedirect != ""
+	isDesktop := state.DesktopChallenge != ""
+
 	// Login-CSRF protection (web): the browser finishing the flow must be the
 	// one that started it, proven by the state cookie set at connect. The mobile
 	// deep-link flow is exempt — the token is handed straight to the app rather than
 	// via a shared browser session, and its in-app auth session may not round-trip the
 	// cookie. Reject before the token exchange to avoid needless work.
-	if state.MobileRedirect == "" && state.DesktopChallenge == "" {
+	if !isMobile && !isDesktop {
 		if !stateCookieMatches(r, stateToken) {
 			p.API.LogWarn("OAuth state cookie missing or mismatched — possible login CSRF")
 			p.clearStateCookie(w)
@@ -368,12 +363,11 @@ func (p *Plugin) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// No session here; the app redeems the code with its verifier.
-	if state.DesktopChallenge != "" {
+	if isDesktop {
 		p.issueDesktopCode(w, &state, mmUser)
 		return
 	}
 
-	isMobile := state.MobileRedirect != ""
 	session, csrfToken, appErr := p.createLoginSession(r, mmUser, isMobile)
 	if appErr != nil {
 		p.API.LogError("Failed to create session", "error", appErr.Error(), "user_id", mmUser.Id)
@@ -909,4 +903,12 @@ func nonceMatches(expected, got string) bool {
 		return false
 	}
 	return hmac.Equal([]byte(expected), []byte(got))
+}
+
+// safeReturnTo returns path if it is a same-origin relative path, otherwise "/".
+func safeReturnTo(path string) string {
+	if !strings.HasPrefix(path, "/") || strings.HasPrefix(path, "//") || strings.ContainsRune(path, '\\') {
+		return "/"
+	}
+	return path
 }
