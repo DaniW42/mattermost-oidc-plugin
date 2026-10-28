@@ -13,23 +13,31 @@ export async function startDesktopLogin({base, returnTo, env = window}) {
     const verifier = base64url(env.crypto.getRandomValues(new Uint8Array(32)));
     env.sessionStorage.setItem(VERIFIER_KEY, verifier);
 
-    const query = `desktop_challenge=${await challengeOf(verifier, env)}&return_to=${encodeURIComponent(returnTo)}`;
-    const res = await env.fetch(`${base}/connect?${query}`);
-    if (!res.ok) {
-        throw new Error(`HTTP ${res.status}`);
-    }
-    const {authorize_url: authorizeUrl} = await res.json();
+    try {
+        const query = `desktop_challenge=${await challengeOf(verifier, env)}&return_to=${encodeURIComponent(returnTo)}`;
+        const res = await env.fetch(`${base}/connect?${query}`);
+        if (!res.ok) {
+            throw new Error(`HTTP ${res.status}`);
+        }
+        const {authorize_url: authorizeUrl} = await res.json();
 
-    // The app would load a same-origin URL as the server itself.
-    if (new URL(authorizeUrl).origin === env.location.origin) {
-        throw new Error('Identity provider must not share the server origin');
-    }
-    if (env.sessionStorage.getItem(VERIFIER_KEY) !== verifier) {
-        return; // a newer login replaced this one
-    }
+        // The app would load a same-origin URL as the server itself.
+        if (new URL(authorizeUrl).origin === env.location.origin) {
+            throw new Error('Identity provider must not share the server origin');
+        }
+        if (env.sessionStorage.getItem(VERIFIER_KEY) !== verifier) {
+            return; // a newer login replaced this one
+        }
 
-    // Electron returns null even when the system browser opened.
-    env.open(authorizeUrl);
+        // Electron returns null even when the system browser opened.
+        env.open(authorizeUrl);
+    } catch (err) {
+        // No browser login is pending, so the verifier is of no use. A newer login keeps its own.
+        if (env.sessionStorage.getItem(VERIFIER_KEY) === verifier) {
+            env.sessionStorage.removeItem(VERIFIER_KEY);
+        }
+        throw err;
+    }
 }
 
 // Redeems a desktop_code from the current URL. Resolves to 'done', 'error', or null if there is none.

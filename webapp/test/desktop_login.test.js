@@ -53,6 +53,46 @@ test('start refuses an identity provider on the server origin', async () => {
     assert.equal(env.calls.open.length, 0);
 });
 
+test('start clears the verifier when the server rejects the request', async () => {
+    const env = makeEnv({fetchResult: {ok: false}});
+    await assert.rejects(startDesktopLogin({base: BASE, returnTo: '/', env}));
+    assert.equal(hasPendingDesktopLogin(env), false);
+    assert.equal(env.calls.open.length, 0);
+});
+
+test('start clears the verifier when the identity provider shares the server origin', async () => {
+    const env = makeEnv({fetchResult: {ok: true, body: {authorize_url: 'https://mm.example/auth'}}});
+    await assert.rejects(startDesktopLogin({base: BASE, returnTo: '/', env}));
+    assert.equal(hasPendingDesktopLogin(env), false);
+});
+
+test('start clears the verifier when the request fails', async () => {
+    const env = makeEnv();
+    env.fetch = async () => {
+        throw new TypeError('network down');
+    };
+    await assert.rejects(startDesktopLogin({base: BASE, returnTo: '/', env}), /network down/);
+    assert.equal(hasPendingDesktopLogin(env), false);
+});
+
+test('a failed start does not clear the verifier of a newer login', async () => {
+    const env = makeEnv({fetchResult: {ok: false}});
+    const baseFetch = env.fetch;
+    env.fetch = async (...args) => {
+        env.sessionStorage.setItem('mattermost_oidc_desktop_verifier', 'n'.repeat(43)); // newer login started meanwhile
+        return baseFetch(...args);
+    };
+    await assert.rejects(startDesktopLogin({base: BASE, returnTo: '/', env}));
+    assert.equal(verifierOf(env), 'n'.repeat(43));
+});
+
+test('check navigates to a subpath return_to unchanged', async () => {
+    const env = makeEnv({search: '?desktop_code=abc', fetchResult: {ok: true, body: {return_to: '/mattermost/team/town-square'}}});
+    env.sessionStorage.setItem('mattermost_oidc_desktop_verifier', 'v'.repeat(43));
+    assert.equal(await checkDesktopLogin({base: BASE, env}), 'done');
+    assert.deepEqual(env.calls.assign, ['/mattermost/team/town-square']);
+});
+
 test('check without a code does nothing', async () => {
     const env = makeEnv({search: '?redirect_to=%2Fx'});
     assert.equal(await checkDesktopLogin({base: BASE, env}), null);
